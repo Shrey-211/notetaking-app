@@ -3,25 +3,31 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { initDb, query } from './db/index.js';
 import authRoutes from './routes/auth.js';
 import notesRoutes from './routes/notes.js';
 
 dotenv.config();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Trust Nginx reverse proxy headers for rate limiting
+// Trust Nginx / Railway reverse proxy headers for rate limiting
 app.set('trust proxy', 1);
 
-// Production Security Headers
-app.use(helmet());
+// Production Security Headers (disable contentSecurityPolicy in production for embedded scripts)
+app.use(helmet({ contentSecurityPolicy: false }));
 
 // CORS configuration
 app.use(
   cors({
-    origin: '*', // Allows frontend container/dev server requests
+    origin: '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   })
@@ -33,15 +39,15 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Rate Limiting to protect against abuse
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300, // max 300 requests per window
+  windowMs: 15 * 60 * 1000,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later.' },
 });
 app.use('/api/', limiter);
 
-// Health Check Endpoint
+// Health Check Endpoint for Railway & Docker
 app.get('/health', async (req, res) => {
   try {
     const dbRes = await query('SELECT 1');
@@ -55,9 +61,20 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Routes
+// REST API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/notes', notesRoutes);
+
+// Static frontend serving for single-service Railway deployments
+const distPath = path.join(__dirname, '../../frontend/dist');
+if (fs.existsSync(distPath)) {
+  console.log(`📁 Serving compiled static frontend from ${distPath}`);
+  app.use(express.static(distPath));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
 
 // Global Error Handler
 app.use((err, req, res, next) => {
@@ -69,7 +86,7 @@ app.use((err, req, res, next) => {
 const startServer = async () => {
   try {
     await initDb();
-    const server = app.listen(PORT, () => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT} [NODE_ENV=${process.env.NODE_ENV || 'development'}]`);
     });
 

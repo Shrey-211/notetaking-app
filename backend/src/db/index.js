@@ -11,15 +11,25 @@ const { Pool } = pkg;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Candidate credentials for local & container environments
+// Candidate credentials for local, Docker, and Railway environments
 const getCredentialCandidates = () => {
-  const envUser = process.env.POSTGRES_USER;
-  const envPass = process.env.POSTGRES_PASSWORD;
-  const envHost = process.env.POSTGRES_HOST || 'localhost';
-  const envPort = parseInt(process.env.POSTGRES_PORT || '5432');
-  const envDb = process.env.POSTGRES_DB || 'notes_db';
+  const connectionString = process.env.DATABASE_URL || process.env.POSTGRESQL_URL || process.env.DATABASE_PRIVATE_URL;
+  const envHost = process.env.POSTGRES_HOST || process.env.PGHOST || 'localhost';
+  const envPort = parseInt(process.env.POSTGRES_PORT || process.env.PGPORT || '5432');
+  const envUser = process.env.POSTGRES_USER || process.env.PGUSER;
+  const envPass = process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD;
+  const envDb = process.env.POSTGRES_DB || process.env.PGDATABASE || 'notes_db';
 
   const candidates = [];
+
+  // Railway / Heroku connection string
+  if (connectionString) {
+    const isProd = process.env.NODE_ENV === 'production';
+    candidates.push({
+      connectionString,
+      ssl: isProd && !connectionString.includes('localhost') ? { rejectUnauthorized: false } : false,
+    });
+  }
 
   if (envUser) {
     candidates.push({ host: envHost, port: envPort, user: envUser, password: envPass || '', database: envDb });
@@ -32,19 +42,13 @@ const getCredentialCandidates = () => {
   candidates.push({ host: envHost, port: envPort, user: 'postgres', password: 'password', database: envDb });
   candidates.push({ host: envHost, port: envPort, user: 'postgres', password: '', database: envDb });
 
-  // Remove duplicates based on user+password+database
-  const seen = new Set();
-  return candidates.filter((c) => {
-    const key = `${c.host}:${c.port}:${c.user}:${c.password}:${c.database}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return candidates;
 };
 
 let activePool = null;
 
 const ensureDatabaseExists = async (creds) => {
+  if (creds.connectionString) return; // Managed DBs already exist
   const targetDb = creds.database;
   const sysPool = new Pool({
     ...creds,
@@ -78,16 +82,18 @@ export const initDb = async () => {
 
   for (const creds of candidates) {
     try {
-      console.log(`Connecting to PostgreSQL database '${creds.database}' at ${creds.host}:${creds.port} as user '${creds.user}'...`);
+      const logTarget = creds.connectionString ? 'DATABASE_URL' : `${creds.user}@${creds.host}:${creds.port}/${creds.database}`;
+      console.log(`Connecting to PostgreSQL using ${logTarget}...`);
+      
       activePool = new Pool({
         ...creds,
         max: 20,
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 3000,
+        connectionTimeoutMillis: 5000,
       });
 
       const client = await activePool.connect();
-      console.log(`✅ Connected to PostgreSQL successfully as user '${creds.user}'.`);
+      console.log(`✅ Connected to PostgreSQL successfully.`);
 
       const sqlPath = path.join(__dirname, 'init.sql');
       const sql = fs.readFileSync(sqlPath, 'utf8');
@@ -103,7 +109,7 @@ export const initDb = async () => {
         await activePool.end().catch(() => {});
       }
 
-      if (err.code === '3D000' || (err.message && err.message.includes('does not exist'))) {
+      if (!creds.connectionString && (err.code === '3D000' || (err.message && err.message.includes('does not exist')))) {
         console.log(`Database '${creds.database}' missing. Attempting auto-creation...`);
         await ensureDatabaseExists(creds);
         try {
@@ -125,7 +131,7 @@ export const initDb = async () => {
 
   if (!connected) {
     throw new Error(
-      `Could not connect to PostgreSQL database (${lastError ? lastError.message : 'Unknown error'}). Check backend/.env credentials.`
+      `Could not connect to PostgreSQL database (${lastError ? lastError.message : 'Unknown error'}). Check database connection credentials.`
     );
   }
 };
